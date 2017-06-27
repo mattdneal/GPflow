@@ -1,13 +1,14 @@
 import tensorflow as tf
 import numpy as np
-from .model import GPModel
+from .model import GPModel, Model
 from .gpr import GPR
-from .param import Param
+from .param import Param, DataHolder
 from .mean_functions import Zero
 from . import likelihoods
 from . import transforms
 from . import kernels
 from ._settings import settings
+from .densities import multivariate_normal
 
 float_type = settings.dtypes.float_type
 
@@ -54,6 +55,57 @@ class GPLVM(GPR):
         del self.X  # in GPLVM this is a Param
         self.X = Param(X_mean)
 
+class SGPLVM(Model):
+    def __init__(self, Y, latent_dim, X_mean=None):
+        """
+        Initialise SGPLVM object. 
+        :param Y: data array. Samples vary across first dimension, other dimensions encode structure
+        :param latent_dim: number of latent dimensions
+        :param X_mean: initial latent positions, size Y.shape[0] x latent_dim
+        """
+        
+        Model.__init__(self)
+        
+        self.likelihood = likelihoods.Gaussian()
+        self.mean_function=Zero()
+        
+        X_struct = np.transpose(np.reshape(np.indices(Y.shape), (len(Y.shape), np.prod(Y.shape))))
+
+        self.indices = DataHolder(X_struct[:,0])
+        self.X_struct = DataHolder(X_struct[:,1:].astype(np.float64))
+        
+        if X_mean is None:
+            X_mean = PCA_reduce(Y.reshape((Y.shape[0], -1)), latent_dim)
+            
+        assert X_mean.shape[1] == latent_dim, \
+            'Passed in number of latent ' + str(latent_dim) + ' does not match initial X ' + str(X_mean.shape[1])
+        self.X_latent = Param(X_mean)
+        
+            
+        self.sgplvm_latent_dim = len(Y.shape) + latent_dim - 1
+        self.latent_dim = latent_dim
+        self.Y = DataHolder(Y.reshape(-1, 1), on_shape_change='pass')
+        
+        self.kern = kernels.RBF(self.sgplvm_latent_dim, ARD=True)
+        
+        
+        
+    def build_likelihood(self):
+        """
+        Construct a tensorflow function to compute the likelihood.
+
+            \log p(Y | theta).
+
+        """
+        
+        X = tf.concat([tf.gather(self.X_latent, self.indices), self.X_struct], 1)
+        
+        K = self.kern.K(X) + tf.eye(tf.shape(X)[0], dtype=float_type) * self.likelihood.variance
+        L = tf.cholesky(K)
+        m = self.mean_function(X)
+
+        return multivariate_normal(self.Y, m, L)
+        
 
 class BayesianGPLVM(GPModel):
     def __init__(self, X_mean, X_var, Y, kern, M, Z=None, X_prior_mean=None, X_prior_var=None):
