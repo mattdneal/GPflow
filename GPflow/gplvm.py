@@ -81,13 +81,13 @@ class SGPLVM(Model):
             'Passed in number of latent ' + str(latent_dim) + ' does not match initial X ' + str(X_mean.shape[1])
         self.X_latent = Param(X_mean)
         
-            
-        self.sgplvm_latent_dim = len(Y.shape) + latent_dim - 1
+        self.struct_dim = len(Y.shape) - 1
         self.latent_dim = latent_dim
+        self.sgplvm_latent_dim = self.struct_dim + self.latent_dim
         self.Y = DataHolder(Y.reshape(-1, 1), on_shape_change='pass')
         
-        self.kern = kernels.RBF(self.sgplvm_latent_dim, ARD=True)
-        
+        self.kern_latent = kernels.RBF(self.latent_dim, ARD=True)
+        self.kern_struct = kernels.RBF(self.struct_dim, ARD=True)
         
         
     def build_likelihood(self):
@@ -97,10 +97,19 @@ class SGPLVM(Model):
             \log p(Y | theta).
 
         """
+        K_latent = self.kern_latent.K(self.X_latent)
+        K_struct = self.kern_struct.K(self.X_struct)
         
-        X = tf.concat([tf.gather(self.X_latent, self.indices), self.X_struct], 1)
+        i, k, s = tf.shape(K_latent)[0], tf.shape(K_struct)[0], tf.shape(K_struct)[0]
+        o = s * (i - 1) + k
+        K_latent = tf.reshape(K_latent, [1, i, i, 1])
+        K_struct = tf.reshape(K_struct, [k, k, 1, 1])
+
         
-        K = self.kern.K(X) + tf.eye(tf.shape(X)[0], dtype=float_type) * self.likelihood.variance
+        K_kronecker = tf.squeeze(tf.nn.conv2d_transpose(K_struct, K_latent, (1, o, o, 1), [1, s, s, 1], "VALID"))
+
+        
+        K = K_kronecker + tf.eye(tf.shape(K_kronecker)[0], dtype=float_type) * self.likelihood.variance
         L = tf.cholesky(K)
         m = self.mean_function(X)
 
